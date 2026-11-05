@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "isekai-elf",
+    "slug": "isekai-elf",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "isekaielf",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "icon": "./assets/expo.icon"
+    },
+    "android": {
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "output": "server"
+    },
+    "plugins": [
+      "expo-router"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}
