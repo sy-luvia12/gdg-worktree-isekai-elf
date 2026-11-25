@@ -1,10 +1,13 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Image } from 'expo-image';
 import { Stack } from 'expo-router';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Modal, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { GestureDetector, usePanGesture } from 'react-native-gesture-handler';
 import Animated, { cancelAnimation, Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
+
+import * as api from '@/api';
+import type { Character } from '@/api';
 
 // 모든 좌표는 디자인 기준(가로 360, 섹션 하나 세로 800) 픽셀. 화면 폭에 맞춰 scale 곱함.
 const W = 360;
@@ -20,7 +23,6 @@ const img = {
   backBtn: require('@/assets/images/dummy/object/obj_backbtn.png'),
   shutter: require('@/assets/images/dummy/object/obj_camshutter.png'),
   mimir: require('@/assets/images/dummy/character/char_mimir.png'),
-  c111: require('@/assets/images/dummy/character/char_c111.png'),
 };
 
 // bg_master 위에서 아래로: 상층부, 전환, 홈, 전환, 비석, 전환, 샘. 화면(역)만 Y에 두고 전환 구간은 스크롤로 지나감.
@@ -34,66 +36,87 @@ const SETTLE_MS = 550; // 손 뗀 뒤 역까지 미끄러지는 시간
 const FLICK_V = 250; // 손 뗄 때 속도(px/s)
 const FLICK_D = 50; // 끈 거리(디자인 px)
 
-// 해금 판정: 자식 코드 cAB.. 기준. 분기점(pX0)은 그보다 아래 갈래(A > X) 아무거나 찾으면, 끝 식물류(pXY)는 cXY.. 를 찾으면 해금.
-const unlocked = (code: string, found: string[]) =>
-  code[2] === '0' ? found.some((f) => f[1] > code[1]) : found.some((f) => f.slice(1, 3) === code.slice(1, 3));
-
-// ponytail: 건강검진도 가짜 결과에서 랜덤 선택. 상세 페이지 로그는 아직 없음.
-const CHECKUPS = [
-  '잎 색이 고르고 탄탄하군. 지금처럼만 돌봐 주게.',
-  '흙이 너무 축축하네. 물 주는 간격을 조금 늘리게.',
-  '빛이 부족해 보이는군. 창가 쪽으로 옮겨 주게.',
-];
-
-// 식물 분류는 노션 '식물 분류' 표 기준. code = 노션 코드.
-// ponytail: 설명(desc)은 노션에 없어 임시 문구.
-// 주의: 진정쌍떡잎/단자엽 이미지 파일명은 옛 6번대를 5로만 낮춘 것이라 노션 코드와 반대 —
-//   파일 p52·c52x = 진정쌍떡잎(노션 p51·c51x), 파일 p51·c51x = 단자엽(노션 p52·c52x).
-// 비석(bg_stone)의 빨간 원(식물류) 중심 좌표. 크기 48.
+// ---- 비석 그림·위치 (화면 전용 디자인). 이름·설명·부모 관계는 C-1(api.getCharacters)에서 옴. ----
+// id 는 디자이너 확정 코드(5번대, 초기 분화군 p55).
+// 주의: 진정쌍떡잎/단자엽 이미지 파일명은 옛 6번대를 5로만 낮춘 것이라 코드와 반대 —
+//   파일 p52·c52x = 진정쌍떡잎(p51·c51x), 파일 p51·c51x = 단자엽(p52·c52x).
+// 빨간 원(식물류 묶음) 중심 좌표, 크기 48
 const PARENT_ICONS = [
-  { src: require('@/assets/images/dummy/familytree/parent icon/obj_p00.png'), x: 180, y: 616, code: 'p00', name: '육상식물', desc: '물을 떠나 땅 위로 올라온 모든 식물의 뿌리라네.' },
-  { src: require('@/assets/images/dummy/familytree/parent icon/obj_p10.png'), x: 180, y: 560, code: 'p10', name: '관다발식물', desc: '물과 양분을 나르는 관다발을 얻어 키가 커질 수 있게 되었지.' },
-  { src: require('@/assets/images/dummy/familytree/parent icon/obj_p11.png'), x: 108, y: 557, code: 'p11', name: '선태식물', desc: '관다발 없이 땅에 낮게 붙어 사는 이끼 무리라네. 축축한 곳을 좋아하지.' },
-  { src: require('@/assets/images/dummy/familytree/parent icon/obj_p20.png'), x: 179, y: 501, code: 'p20', name: '진엽식물', desc: '잎맥이 갈라진 커다란 잎을 얻은 식물들이네.' },
-  { src: require('@/assets/images/dummy/familytree/parent icon/obj_p21.png'), x: 251, y: 524, code: 'p21', name: '소엽식물', desc: '잎맥이 하나뿐인 작은 잎을 가진 오래된 무리라네.' },
-  { src: require('@/assets/images/dummy/familytree/parent icon/obj_p30.png'), x: 178, y: 448, code: 'p30', name: '종자식물', desc: '포자 대신 씨앗으로 번식하게 된 식물들이지.' },
-  { src: require('@/assets/images/dummy/familytree/parent icon/obj_p31.png'), x: 111, y: 453, code: 'p31', name: '양치식물', desc: '아직 씨앗 없이 포자로 번식하는 무리라네.' },
-  { src: require('@/assets/images/dummy/familytree/parent icon/obj_p40.png'), x: 179, y: 393, code: 'p40', name: '속씨식물', desc: '밑씨를 씨방으로 감싸 꽃을 피우고 열매를 맺게 되었지.' },
-  { src: require('@/assets/images/dummy/familytree/parent icon/obj_p41.png'), x: 261, y: 368, code: 'p41', name: '겉씨식물', desc: '밑씨가 겉으로 드러난 채 씨앗을 맺는 식물이네.' },
-  { src: require('@/assets/images/dummy/familytree/parent icon/obj_p55.png'), x: 179, y: 345, code: 'p55', name: '초기 분화군', desc: '속씨식물 중 일찍 갈라져 나와 옛 꽃의 구조를 간직한 무리라네. 목련이 여기 속하지.' },
-  { src: require('@/assets/images/dummy/familytree/parent icon/obj_p52.png'), x: 180, y: 253, code: 'p51', name: '진정쌍떡잎', desc: '떡잎이 두 장이고 곧은뿌리와 그물맥을 가진 식물이네.' },
-  { src: require('@/assets/images/dummy/familytree/parent icon/obj_p51.png'), x: 101, y: 303, code: 'p52', name: '단자엽', desc: '떡잎이 한 장이고 수염뿌리와 나란히맥을 가진 식물이지.' },
+  { id: 'p00', x: 180, y: 616, src: require('@/assets/images/dummy/familytree/parent icon/obj_p00.png') },
+  { id: 'p10', x: 180, y: 560, src: require('@/assets/images/dummy/familytree/parent icon/obj_p10.png') },
+  { id: 'p11', x: 108, y: 557, src: require('@/assets/images/dummy/familytree/parent icon/obj_p11.png') },
+  { id: 'p20', x: 179, y: 501, src: require('@/assets/images/dummy/familytree/parent icon/obj_p20.png') },
+  { id: 'p21', x: 251, y: 524, src: require('@/assets/images/dummy/familytree/parent icon/obj_p21.png') },
+  { id: 'p30', x: 178, y: 448, src: require('@/assets/images/dummy/familytree/parent icon/obj_p30.png') },
+  { id: 'p31', x: 111, y: 453, src: require('@/assets/images/dummy/familytree/parent icon/obj_p31.png') },
+  { id: 'p40', x: 179, y: 393, src: require('@/assets/images/dummy/familytree/parent icon/obj_p40.png') },
+  { id: 'p41', x: 261, y: 368, src: require('@/assets/images/dummy/familytree/parent icon/obj_p41.png') },
+  { id: 'p55', x: 179, y: 345, src: require('@/assets/images/dummy/familytree/parent icon/obj_p55.png') },
+  { id: 'p51', x: 180, y: 253, src: require('@/assets/images/dummy/familytree/parent icon/obj_p52.png') },
+  { id: 'p52', x: 101, y: 303, src: require('@/assets/images/dummy/familytree/parent icon/obj_p51.png') },
 ];
-
-// 비석의 숫자 배지(식물 한 종류) 중심 좌표. 배지 지름 30.
+// 숫자 배지(식물류) 중심 좌표, 지름 30. 목련(c555)은 배지 없음 — 초기 분화군(p55) 원을 누르면 함께 보여줌.
 const CHILD_ICONS = [
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c111.png'), char: require('@/assets/images/dummy/character/char_c111.png'), x: 74, y: 525, code: 'c111', name: '이끼류', desc: '줄기와 잎 모양을 갖춘 작은 이끼라네. 그늘지고 촉촉한 곳에 융단처럼 깔리지.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c112.png'), char: require('@/assets/images/dummy/character/char_c112.png'), x: 104, y: 510, code: 'c112', name: '간류', desc: '납작한 몸으로 땅에 붙어 자라는 이끼야. 우산이끼가 대표적이지.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c113.png'), char: require('@/assets/images/dummy/character/char_c113.png'), x: 133, y: 521, code: 'c113', name: '뿔이끼류', desc: '뿔처럼 길쭉한 포자체를 세우는 이끼라네.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c211.png'), char: require('@/assets/images/dummy/character/char_c211.png'), x: 258, y: 483, code: 'c211', name: '석송류', desc: '작은 비늘잎이 줄기를 빽빽이 덮은 아이지. 아주 먼 옛날엔 거대한 나무였다네.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c311.png'), char: require('@/assets/images/dummy/character/char_c311.png'), x: 91, y: 413, code: 'c311', name: '고사리류', desc: '잎 뒷면의 포자로 번식하네. 밝은 그늘과 높은 습도를 좋아하지.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c312.png'), char: require('@/assets/images/dummy/character/char_c312.png'), x: 126, y: 413, code: 'c312', name: '쇠뜨기류', desc: '마디마디 끊어지는 줄기를 가진 아이라네. 이른 봄 뱀밥을 내밀지.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c411.png'), char: require('@/assets/images/dummy/character/char_c411.png'), x: 218, y: 336, code: 'c411', name: '소철류', desc: '야자처럼 생겼지만 겉씨식물이라네. 아주 천천히 자라지.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c412.png'), char: require('@/assets/images/dummy/character/char_c412.png'), x: 241, y: 320, code: 'c412', name: '은행나무', desc: '살아 있는 화석이라 불리지. 가을이면 부채 모양 잎이 노랗게 물든다네.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c413.png'), char: require('@/assets/images/dummy/character/char_c413.png'), x: 272, y: 316, code: 'c413', name: '침엽수', desc: '바늘잎과 솔방울을 가진 나무들이지. 소나무, 전나무가 여기 속하네.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c521.png'), char: require('@/assets/images/dummy/character/char_c521.png'), x: 124, y: 224, code: 'c511', name: '장미', desc: '가시 돋친 줄기에 향기로운 꽃을 피우지. 햇빛과 바람을 좋아한다네.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c522.png'), char: require('@/assets/images/dummy/character/char_c522.png'), x: 150, y: 204, code: 'c512', name: '국화', desc: '가을에 피는 꽃이라네. 작은 꽃이 모여 한 송이처럼 보이지.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c523.png'), char: require('@/assets/images/dummy/character/char_c523.png'), x: 180, y: 196, code: 'c513', name: '콩', desc: '꼬투리 속에 씨앗을 품는 아이야. 뿌리혹이 땅을 기름지게 한다네.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c524.png'), char: require('@/assets/images/dummy/character/char_c524.png'), x: 208, y: 202, code: 'c514', name: '참나무', desc: '도토리를 맺는 튼튼한 나무지. 숲의 많은 생명을 먹여 살린다네.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c525.png'), char: require('@/assets/images/dummy/character/char_c525.png'), x: 234, y: 221, code: 'c515', name: '해바라기', desc: '해를 따라 고개를 돌리는 아이야. 햇빛을 아주 좋아한다네.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c511.png'), char: require('@/assets/images/dummy/character/char_c511.png'), x: 70, y: 276, code: 'c521', name: '벼', desc: '우리가 먹는 쌀이 열리는 풀이라네. 물을 아주 좋아하지.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c512.png'), char: require('@/assets/images/dummy/character/char_c512.png'), x: 95, y: 258, code: 'c522', name: '백합', desc: '크고 향기로운 꽃을 피우는 알뿌리 식물이야. 흙이 너무 축축하지 않게 해 주게.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c513.png'), char: require('@/assets/images/dummy/character/char_c513.png'), x: 125, y: 266, code: 'c523', name: '야자', desc: '따뜻한 곳에서 큰 잎을 펼치는 아이지. 밝은 빛을 좋아한다네.' },
-  { src: require('@/assets/images/dummy/familytree/child icon/obj_c514.png'), char: require('@/assets/images/dummy/character/char_c514.png'), x: 145, y: 284, code: 'c524', name: '난초', desc: '섬세한 꽃을 오래 피우는 아이야. 바람이 잘 통하게, 물은 뿌리가 마르면 주게.' },
+  { id: 'c111', x: 74, y: 525, src: require('@/assets/images/dummy/familytree/child icon/obj_c111.png') },
+  { id: 'c112', x: 104, y: 510, src: require('@/assets/images/dummy/familytree/child icon/obj_c112.png') },
+  { id: 'c113', x: 133, y: 521, src: require('@/assets/images/dummy/familytree/child icon/obj_c113.png') },
+  { id: 'c211', x: 258, y: 483, src: require('@/assets/images/dummy/familytree/child icon/obj_c211.png') },
+  { id: 'c311', x: 91, y: 413, src: require('@/assets/images/dummy/familytree/child icon/obj_c311.png') },
+  { id: 'c312', x: 126, y: 413, src: require('@/assets/images/dummy/familytree/child icon/obj_c312.png') },
+  { id: 'c411', x: 218, y: 336, src: require('@/assets/images/dummy/familytree/child icon/obj_c411.png') },
+  { id: 'c412', x: 241, y: 320, src: require('@/assets/images/dummy/familytree/child icon/obj_c412.png') },
+  { id: 'c413', x: 272, y: 316, src: require('@/assets/images/dummy/familytree/child icon/obj_c413.png') },
+  { id: 'c511', x: 124, y: 224, src: require('@/assets/images/dummy/familytree/child icon/obj_c521.png') },
+  { id: 'c512', x: 150, y: 204, src: require('@/assets/images/dummy/familytree/child icon/obj_c522.png') },
+  { id: 'c513', x: 180, y: 196, src: require('@/assets/images/dummy/familytree/child icon/obj_c523.png') },
+  { id: 'c514', x: 208, y: 202, src: require('@/assets/images/dummy/familytree/child icon/obj_c524.png') },
+  { id: 'c515', x: 234, y: 221, src: require('@/assets/images/dummy/familytree/child icon/obj_c525.png') },
+  { id: 'c521', x: 70, y: 276, src: require('@/assets/images/dummy/familytree/child icon/obj_c511.png') },
+  { id: 'c522', x: 95, y: 258, src: require('@/assets/images/dummy/familytree/child icon/obj_c512.png') },
+  { id: 'c523', x: 125, y: 266, src: require('@/assets/images/dummy/familytree/child icon/obj_c513.png') },
+  { id: 'c524', x: 145, y: 284, src: require('@/assets/images/dummy/familytree/child icon/obj_c514.png') },
 ];
+// 엘프 그림(식물류 id → 파일). ponytail: 서버 image_path 대신 로컬 파일. 그림을 Storage로 옮기면 image_path 사용.
+const CHAR_IMG: Record<string, number> = {
+  c111: require('@/assets/images/dummy/character/char_c111.png'),
+  c112: require('@/assets/images/dummy/character/char_c112.png'),
+  c113: require('@/assets/images/dummy/character/char_c113.png'),
+  c211: require('@/assets/images/dummy/character/char_c211.png'),
+  c311: require('@/assets/images/dummy/character/char_c311.png'),
+  c312: require('@/assets/images/dummy/character/char_c312.png'),
+  c411: require('@/assets/images/dummy/character/char_c411.png'),
+  c412: require('@/assets/images/dummy/character/char_c412.png'),
+  c413: require('@/assets/images/dummy/character/char_c413.png'),
+  c511: require('@/assets/images/dummy/character/char_c521.png'),
+  c512: require('@/assets/images/dummy/character/char_c522.png'),
+  c513: require('@/assets/images/dummy/character/char_c523.png'),
+  c514: require('@/assets/images/dummy/character/char_c524.png'),
+  c515: require('@/assets/images/dummy/character/char_c525.png'),
+  c521: require('@/assets/images/dummy/character/char_c511.png'),
+  c522: require('@/assets/images/dummy/character/char_c512.png'),
+  c523: require('@/assets/images/dummy/character/char_c513.png'),
+  c524: require('@/assets/images/dummy/character/char_c514.png'),
+  c555: require('@/assets/images/dummy/character/char_c555.png'),
+};
 
-// 목련(c555)은 비석에 배지가 없는 예외 — 초기 분화군(p55) 원을 누르면 함께 보여줌.
-const MAGNOLIA = { char: require('@/assets/images/dummy/character/char_c555.png'), code: 'c555', name: '목련', desc: '이른 봄 크고 탐스러운 꽃을 피우는 아이야. 옛 꽃의 모습을 간직하고 있다네.' };
+// 해금(활성화): 식물류는 모았으면, 부모 노드는 바로 아래 노드가 전부 활성화면. (API 초안 협의 답변 기준)
+const isActive = (id: string, chars: Character[], collected: string[]): boolean => {
+  const kids = chars.filter((ch) => ch.parent_id === id);
+  return kids.length ? kids.every((k) => isActive(k.id, chars, collected)) : collected.includes(id);
+};
 
-// ponytail: AI 분석 대신 전체 식물 중 랜덤 선택. 실제 API 붙이면 응답 사용.
-const RESULTS = [...CHILD_ICONS, MAGNOLIA];
+// API 응답을 화면이 쓰는 모양으로
+const fetchCollected = async () => (await api.getMyCharacterCollection()).map((r) => r.character_id); // C-2a
+// 상층부 반려식물: U-2 목록 첫 번째 + U-3 으로 엘프(character_id) 찾기.
+// ponytail: 한 그루만 보여줌. 여러 그루 놓을 자리 생기면 목록 전체로.
+const fetchMyPlant = async () => {
+  const [first] = await api.getMyPlants();
+  if (!first) return null;
+  const detail = await api.getPlant(first.user_plant_id);
+  return { id: first.user_plant_id, nickname: first.nickname, character_id: detail.plant_species?.character_id ?? null };
+};
 
-const at =(s: number) => (x: number, y: number, w: number, h: number) => ({
+const at = (s: number) => (x: number, y: number, w: number, h: number) => ({
   position: 'absolute' as const,
   left: x * s,
   top: y * s,
@@ -103,6 +126,7 @@ const at =(s: number) => (x: number, y: number, w: number, h: number) => ({
 
 type Step = 'idle' | 'camera' | 'analyzing' | 'result';
 type Mode = 'collect' | 'register' | 'checkup';
+type Line = { title: string; body: string };
 
 export default function WorldScreen() {
   const { width } = useWindowDimensions();
@@ -110,18 +134,24 @@ export default function WorldScreen() {
   const box = at(s);
 
   const [step, setStep] = useState<Step>('idle');
-  const [result, setResult] = useState(RESULTS[0]);
   // collect = 하층부 + 깃발(식물 수집), register = 상층부 + 깃발(반려 식물 등록), checkup = 상층부 내 식물 건강검진
   const [mode, setMode] = useState<Mode>('collect');
-  const [lines, setLines] = useState<{ title: string; body: string }[]>([]); // 결과 대사, 탭할 때마다 다음 줄
-  // ponytail: 해금 목록은 메모리에만. 앱 끄면 사라짐 — 저장소 붙일 때 AsyncStorage/서버로.
-  const [found, setFound] = useState<string[]>([]); // 찾은 식물 code
-  // 상층부 반려식물. 반려 식물 등록(상층부 깃발)으로 찍어야 생김. 건강검진 대상.
-  // ponytail: 한 그루만, 새로 등록하면 교체. 여러 그루 키우게 되면 배열로.
-  const [myPlant, setMyPlant] = useState<(typeof RESULTS)[number] | null>(null);
-  const [mainChar, setMainChar] = useState(img.c111); // 홈 메인 캐릭터
+  const [lines, setLines] = useState<Line[]>([]); // 결과 대사, 탭할 때마다 다음 줄
+  const [result, setResult] = useState<string | null>(null); // 방금 찾은 식물류 id (비석에 크게 표시)
+  const [characters, setCharacters] = useState<Character[]>([]); // C-1
+  const [collected, setCollected] = useState<string[]>([]); // C-2a 모은 식물류 id
+  const [myPlant, setMyPlant] = useState<Awaited<ReturnType<typeof fetchMyPlant>>>(null); // 상층부 반려식물
+  // 홈 메인 캐릭터. ponytail: 저장할 API 칸이 없어 메모리에만(src/api/README.md 'API에 없는 값' 참고).
+  const [mainChar, setMainChar] = useState('c111');
   const [picking, setPicking] = useState(false); // 메인 캐릭터 고르는 중
-  const [detail, setDetail] = useState<{ name: string; desc: string; char?: number } | null>(null); // 비석에서 연 식물(류) 상세
+  const [detail, setDetail] = useState<{ name: string; desc: string; char?: number } | null>(null); // 비석에서 연 상세
+
+  useEffect(() => {
+    api.getCharacters().then(setCharacters);
+    fetchCollected().then(setCollected);
+    fetchMyPlant().then(setMyPlant);
+  }, []);
+  const byId = (id: string | null) => characters.find((ch) => ch.id === id);
 
   // pos = 지금 화면 맨 위가 bg_master의 몇 px(디자인 기준)인지. 직접 애니메이션해서 속도·끝맺음을 제어.
   const pos = useSharedValue(0);
@@ -158,47 +188,86 @@ export default function WorldScreen() {
   const camera = useRef<CameraView>(null);
   const [camReady, setCamReady] = useState(false);
 
+  // 촬영 → 업로드(P-1) → 검진(H-1) 또는 식별(I-1) → 수집(I-2)/등록(U-1)
   const onShutter = async () => {
-    // ponytail: 찍은 사진(uri)은 아직 안 씀 — 결과는 랜덤. AI 분석 API 붙일 때 이 사진을 보냄.
-    // 카메라가 없거나(시뮬레이터·권한 거부) 준비 전이면 촬영 없이 진행.
-    if (camReady) await camera.current?.takePictureAsync({ quality: 0.5 }).catch(() => null);
+    // 카메라가 없거나(시뮬레이터·권한 거부) 준비 전이면 사진 없이 진행(더미만 동작).
+    const photo = camReady ? await camera.current?.takePictureAsync({ quality: 0.7 }).catch(() => undefined) : undefined;
     setCamReady(false);
     setStep('analyzing');
     goTo(Y.mimir);
-    // 미미르 화면에서 잠시 대기 → 비석으로 이동
-    setTimeout(() => {
-      setStep('result');
-      if (mode === 'checkup') {
+    try {
+      const { path } = await api.uploadPhoto(photo?.uri);
+
+      if (mode === 'checkup' && myPlant) {
         // 검진: 샘에서 바로 결과 → 확인 후 상층부로
-        const body = CHECKUPS[Math.floor(Math.random() * CHECKUPS.length)];
-        setLines([{ title: `${myPlant?.name} 검진 결과`, body }]);
+        const h = await api.healthCheck({ user_plant_id: myPlant.id, photo_path: path });
+        // needs_more_info 는 확신도 낮거나 원인 unknown 일 때만 보여줌 (API 초안 H-1)
+        const unsure = h.confidence < 0.6 || h.causes[0]?.code === 'unknown';
+        setLines([
+          { title: '미미르', body: h.mimir_message },
+          { title: `${myPlant.nickname} 검진 결과`, body: `${h.summary}\n${h.actions.map((a) => `· ${a}`).join('\n')}\n\n※ 참고용 진단이에요` },
+          ...(unsure && h.needs_more_info ? [{ title: '미미르', body: h.needs_more_info }] : []),
+        ]);
+        setStep('result');
         return;
       }
+
       // 수집·등록: 비석에서 식물류 표시 → 미미르 설명 → (처음이면) 해금 → 수집은 하층부, 등록은 상층부로
-      // ponytail: 등록 후 이름 입력은 아직 없음(기획상 미구현).
-      const r = RESULTS[Math.floor(Math.random() * RESULTS.length)];
-      const isNew = !found.includes(r.code);
-      setResult(r);
+      const { identification_id, candidates } = await api.identify(path);
+      // ponytail: 후보 고르는 화면이 없어 1순위 자동 선택. 후보 선택 UI 붙이면 사용자가 고른 후보로.
+      const top = candidates[0];
+      const saved =
+        mode === 'register'
+          ? // ponytail: 별명 입력 화면이 없어 종 이름을 그대로 별명으로.
+            await api.registerPlant({ nickname: top.korean_name, photo_path: path, species_id: top.species_id, identification_id })
+          : await api.saveDiscovery({ identification_id, species_id: top.species_id, photo_path: path });
+      const ch = byId(top.character_id);
+      setResult(top.character_id);
       setLines([
-        { title: '미미르', body: `이 아이는 ${r.name}로군.` },
-        { title: r.name, body: r.desc },
-        ...(isNew ? [{ title: '새 캐릭터 해금!', body: `처음 만난 아이야. ${r.name}이(가) 비석에 기록되었네.` }] : []),
+        { title: '미미르', body: `이 아이는 ${top.korean_name}로군.` },
+        ...(ch ? [{ title: ch.name, body: ch.description }] : []),
+        ...(saved.is_new_character && saved.character
+          ? [{ title: '새 캐릭터 해금!', body: `처음 만난 아이야. ${saved.character.name}이(가) 비석에 기록되었네.` }]
+          : []),
       ]);
-      if (isNew) setFound((f) => [...f, r.code]);
-      if (mode === 'register') setMyPlant(r);
+      setCollected(await fetchCollected());
+      if (mode === 'register') setMyPlant(await fetchMyPlant());
+      setStep('result');
       goTo(Y.stone);
-    }, 2500);
+    } catch (e) {
+      // Edge Function 에러 message 는 화면 문구라 그대로 보여줌
+      setLines([{ title: '미미르', body: e instanceof Error ? e.message : '문제가 생겼네. 다시 해 보게.' }]);
+      setStep('result');
+    }
   };
 
   const onNext = () => {
     if (lines.length > 1) return setLines(lines.slice(1));
     setStep('idle');
+    setResult(null);
     goTo(mode === 'collect' ? Y.home : Y.top);
   };
 
   const openCamera = (m: Mode) => {
     setMode(m);
     setStep('camera');
+  };
+
+  // 부모 노드 상세. 초기 분화군은 배지 없는 목련을 함께 보여줌(모았을 때만)
+  const openParent = (id: string) => {
+    const p = byId(id);
+    if (!p) return;
+    const magnolia = byId('c555');
+    setDetail(id === 'p55' && magnolia && collected.includes('c555')
+      ? { name: `${p.name} · ${magnolia.name}`, desc: `${p.description}\n\n${magnolia.description}`, char: CHAR_IMG.c555 }
+      : { name: p.name, desc: p.description });
+  };
+  const openChild = (id: string) => {
+    const c = byId(id);
+    // 아직 못 모은 식물류는 이름·설명 숨김
+    setDetail(c && collected.includes(id)
+      ? { name: c.name, desc: c.description }
+      : { name: '???', desc: '아직 만나지 못한 아이로군. 하층부에서 찾아보게.' });
   };
 
   // + 깃발: 상층부 = 반려 식물 등록, 하층부 = 식물 수집
@@ -225,42 +294,30 @@ export default function WorldScreen() {
           {flags(Y.top + 210, 'register')}
           {myPlant && (
             <Pressable style={box(230, Y.top + 280, 120, 120)} onPress={() => openCamera('checkup')} disabled={step !== 'idle'}>
-              <Image source={myPlant.char} style={StyleSheet.absoluteFill} />
+              {myPlant.character_id && <Image source={CHAR_IMG[myPlant.character_id]} style={StyleSheet.absoluteFill} />}
             </Pressable>
           )}
 
           {/* 홈 */}
           {flags(Y.home + 130, 'collect')}
-          {/* 메인 캐릭터. 누르면 발견한 캐릭터 중에서 고름 */}
+          {/* 메인 캐릭터. 누르면 모은 캐릭터 중에서 고름 */}
           <Pressable style={box(80, Y.home + 280, 220, 220)} onPress={() => setPicking(true)} disabled={step !== 'idle'}>
-            <Image source={mainChar} style={StyleSheet.absoluteFill} />
+            <Image source={CHAR_IMG[mainChar]} style={StyleSheet.absoluteFill} />
           </Pressable>
 
-          {/* 비석 */}
+          {/* 비석: 빨간 원 = 식물류 묶음, 숫자 배지 = 식물류. 활성화 전엔 그림 안 그림 → 배경의 회색 그대로 */}
           <Image source={img.odin} style={box(100, Y.stone + 55, 48, 48)} />
-          {/* 빨간 원 = 식물류, 숫자 배지 = 식물 한 종류. 누르면 설명 오버레이 */}
           {PARENT_ICONS.map((p) => (
-            <Pressable key={p.name} style={box(p.x - 24, Y.stone + p.y - 24, 48, 48)} onPress={() =>
-                // 초기 분화군은 배지 없는 목련을 함께 보여줌(발견했을 때만)
-                setDetail(p.code === 'p55' && found.includes(MAGNOLIA.code)
-                  ? { name: `${p.name} · ${MAGNOLIA.name}`, desc: `${p.desc}\n\n${MAGNOLIA.desc}`, char: MAGNOLIA.char }
-                  : p)}
-              disabled={step !== 'idle'}>
-              {/* 미해금이면 그림 안 그림 → bg_master의 회색 원 그대로 */}
-              {unlocked(p.code, found) && <Image source={p.src} style={StyleSheet.absoluteFill} />}
+            <Pressable key={p.id} style={box(p.x - 24, Y.stone + p.y - 24, 48, 48)} onPress={() => openParent(p.id)} disabled={step !== 'idle'}>
+              {isActive(p.id, characters, collected) && <Image source={p.src} style={StyleSheet.absoluteFill} />}
             </Pressable>
           ))}
           {CHILD_ICONS.map((c) => (
-            <Pressable
-              key={c.name}
-              style={box(c.x - 15, Y.stone + c.y - 15, 30, 30)}
-              // 미발견 식물은 이름·설명 숨김
-              onPress={() => setDetail(found.includes(c.code) ? c : { name: '???', desc: '아직 만나지 못한 아이로군. 하층부에서 찾아보게.' })}
-              disabled={step !== 'idle'}>
-              {found.includes(c.code) && <Image source={c.src} style={StyleSheet.absoluteFill} />}
+            <Pressable key={c.id} style={box(c.x - 15, Y.stone + c.y - 15, 30, 30)} onPress={() => openChild(c.id)} disabled={step !== 'idle'}>
+              {collected.includes(c.id) && <Image source={c.src} style={StyleSheet.absoluteFill} />}
             </Pressable>
           ))}
-          {step === 'result' && mode !== 'checkup' && <Image source={result.char} style={box(110, Y.stone + 230, 160, 160)} />}
+          {step === 'result' && result && <Image source={CHAR_IMG[result]} style={box(110, Y.stone + 230, 160, 160)} />}
 
           {/* 샘 */}
           <Image source={img.mimir} style={box(60, Y.mimir + 180, 240, 240)} />
@@ -278,11 +335,11 @@ export default function WorldScreen() {
       )}
       {picking && (
         <Pressable style={[StyleSheet.absoluteFill, styles.dim, styles.picker]} onPress={() => setPicking(false)}>
-          <Text style={styles.title}>{found.length ? '함께할 아이를 고르게' : '아직 만난 아이가 없네. 하층부에서 찾아보게.'}</Text>
+          <Text style={styles.title}>{collected.length ? '함께할 아이를 고르게' : '아직 만난 아이가 없네. 하층부에서 찾아보게.'}</Text>
           <View style={styles.grid}>
-            {RESULTS.filter((r) => found.includes(r.code)).map((r) => (
-              <Pressable key={r.code} onPress={() => { setMainChar(r.char); setPicking(false); }}>
-                <Image source={r.char} style={{ width: 96 * s, height: 96 * s }} />
+            {collected.filter((id) => CHAR_IMG[id]).map((id) => (
+              <Pressable key={id} onPress={() => { setMainChar(id); setPicking(false); }}>
+                <Image source={CHAR_IMG[id]} style={{ width: 96 * s, height: 96 * s }} />
               </Pressable>
             ))}
           </View>
