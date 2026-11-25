@@ -1,8 +1,10 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Image } from 'expo-image';
+import { launchImageLibraryAsync } from 'expo-image-picker';
 import { Stack } from 'expo-router';
+import { SymbolView } from 'expo-symbols';
 import { useEffect, useRef, useState } from 'react';
-import { Modal, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Modal, Pressable, type PressableStateCallbackType, type StyleProp, StyleSheet, Text, useWindowDimensions, View, type ViewStyle } from 'react-native';
 import { GestureDetector, usePanGesture } from 'react-native-gesture-handler';
 import Animated, { cancelAnimation, Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 
@@ -128,6 +130,12 @@ type Step = 'idle' | 'camera' | 'analyzing' | 'result';
 type Mode = 'collect' | 'register' | 'checkup';
 type Line = { title: string; body: string };
 
+// 누르는 동안 버튼은 살짝 작아지고(shrink), 깃발은 살짝 내려감(sink)
+const shrink = (style: StyleProp<ViewStyle>) => ({ pressed }: PressableStateCallbackType) => [style, pressed && styles.shrink];
+const sink = (style: StyleProp<ViewStyle>) => ({ pressed }: PressableStateCallbackType) => [style, pressed && styles.sink];
+
+const PLANT = 120; // 반려식물 아이콘 크기(디자인 px)
+
 export default function WorldScreen() {
   const { width } = useWindowDimensions();
   const s = width / W;
@@ -184,19 +192,60 @@ export default function WorldScreen() {
   });
   const slide = useAnimatedStyle(() => ({ transform: [{ translateY: -pos.value * s }] }));
 
+  // 반려식물: 길게 누르면 들어 올려 상층부 안에서 옮김. 짧게 누르면 검진.
+  // ponytail: 위치는 메모리에만(저장할 API 칸 없음, src/api/README.md 참고).
+  const plantX = useSharedValue(230);
+  const plantY = useSharedValue(280);
+  const plantFrom = useSharedValue({ x: 0, y: 0 });
+  const lifted = useSharedValue(0);
+  const plantDrag = usePanGesture({
+    enabled: step === 'idle' && !detail && !picking,
+    activateAfterLongPress: 400,
+    onActivate: () => {
+      'worklet';
+      plantFrom.value = { x: plantX.value, y: plantY.value };
+      lifted.value = withTiming(1, { duration: 120 });
+    },
+    onUpdate: (e) => {
+      'worklet';
+      plantX.value = Math.min(Math.max(plantFrom.value.x + e.translationX / s, 0), W - PLANT);
+      plantY.value = Math.min(Math.max(plantFrom.value.y + e.translationY / s, 0), H - PLANT);
+    },
+    onDeactivate: () => {
+      'worklet';
+      lifted.value = withTiming(0, { duration: 120 });
+    },
+  });
+  const plantStyle = useAnimatedStyle(() => ({
+    left: plantX.value * s,
+    top: (Y.top + plantY.value) * s,
+    transform: [{ scale: 1 + lifted.value * 0.12 }],
+    opacity: 1 - lifted.value * 0.15,
+  }));
+
   const [permission, requestPermission] = useCameraPermissions();
   const camera = useRef<CameraView>(null);
   const [camReady, setCamReady] = useState(false);
+  const [facing, setFacing] = useState<'back' | 'front'>('back');
 
-  // 촬영 → 업로드(P-1) → 검진(H-1) 또는 식별(I-1) → 수집(I-2)/등록(U-1)
   const onShutter = async () => {
     // 카메라가 없거나(시뮬레이터·권한 거부) 준비 전이면 사진 없이 진행(더미만 동작).
     const photo = camReady ? await camera.current?.takePictureAsync({ quality: 0.7 }).catch(() => undefined) : undefined;
+    analyze(photo?.uri);
+  };
+  // 왼쪽 아래: 사진첩에서 한 장 골라 촬영한 것처럼 진행. 취소하면 카메라에 그대로.
+  const onGallery = async () => {
+    const r = await launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7 });
+    if (!r.canceled) analyze(r.assets[0].uri);
+  };
+
+  // 사진 → 업로드(P-1) → 검진(H-1) 또는 식별(I-1) → 수집(I-2)/등록(U-1)
+  const analyze = async (uri?: string) => {
     setCamReady(false);
     setStep('analyzing');
     goTo(Y.mimir);
     try {
-      const { path } = await api.uploadPhoto(photo?.uri);
+      const { path } = await api.uploadPhoto(uri);
 
       if (mode === 'checkup' && myPlant) {
         // 검진: 샘에서 바로 결과 → 확인 후 상층부로
@@ -275,7 +324,7 @@ export default function WorldScreen() {
     <>
       <Image source={img.odin} style={box(20, y - 40, 48, 48)} />
       <Image source={img.mapFlag} style={box(-10, y, 120, 360)} />
-      <Pressable style={box(-10, y + 210, 120, 360)} onPress={() => openCamera(flagMode)} disabled={step !== 'idle'}>
+      <Pressable style={sink(box(-10, y + 210, 120, 360))} onPress={() => openCamera(flagMode)} disabled={step !== 'idle'}>
         <Image source={img.addFlag} style={StyleSheet.absoluteFill} />
       </Pressable>
     </>
@@ -293,27 +342,31 @@ export default function WorldScreen() {
           {/* 상층부 */}
           {flags(Y.top + 210, 'register')}
           {myPlant && (
-            <Pressable style={box(230, Y.top + 280, 120, 120)} onPress={() => openCamera('checkup')} disabled={step !== 'idle'}>
-              {myPlant.character_id && <Image source={CHAR_IMG[myPlant.character_id]} style={StyleSheet.absoluteFill} />}
-            </Pressable>
+            <GestureDetector gesture={plantDrag}>
+              <Animated.View style={[styles.plant, { width: PLANT * s, height: PLANT * s }, plantStyle]}>
+                <Pressable style={shrink(styles.fill)} onPress={() => openCamera('checkup')} disabled={step !== 'idle'}>
+                  {myPlant.character_id && <Image source={CHAR_IMG[myPlant.character_id]} style={StyleSheet.absoluteFill} />}
+                </Pressable>
+              </Animated.View>
+            </GestureDetector>
           )}
 
           {/* 홈 */}
           {flags(Y.home + 130, 'collect')}
           {/* 메인 캐릭터. 누르면 모은 캐릭터 중에서 고름 */}
-          <Pressable style={box(80, Y.home + 280, 220, 220)} onPress={() => setPicking(true)} disabled={step !== 'idle'}>
+          <Pressable style={shrink(box(80, Y.home + 280, 220, 220))} onPress={() => setPicking(true)} disabled={step !== 'idle'}>
             <Image source={CHAR_IMG[mainChar]} style={StyleSheet.absoluteFill} />
           </Pressable>
 
           {/* 비석: 빨간 원 = 식물류 묶음, 숫자 배지 = 식물류. 활성화 전엔 그림 안 그림 → 배경의 회색 그대로 */}
           <Image source={img.odin} style={box(100, Y.stone + 55, 48, 48)} />
           {PARENT_ICONS.map((p) => (
-            <Pressable key={p.id} style={box(p.x - 24, Y.stone + p.y - 24, 48, 48)} onPress={() => openParent(p.id)} disabled={step !== 'idle'}>
+            <Pressable key={p.id} style={shrink(box(p.x - 24, Y.stone + p.y - 24, 48, 48))} onPress={() => openParent(p.id)} disabled={step !== 'idle'}>
               {isActive(p.id, characters, collected) && <Image source={p.src} style={StyleSheet.absoluteFill} />}
             </Pressable>
           ))}
           {CHILD_ICONS.map((c) => (
-            <Pressable key={c.id} style={box(c.x - 15, Y.stone + c.y - 15, 30, 30)} onPress={() => openChild(c.id)} disabled={step !== 'idle'}>
+            <Pressable key={c.id} style={shrink(box(c.x - 15, Y.stone + c.y - 15, 30, 30))} onPress={() => openChild(c.id)} disabled={step !== 'idle'}>
               {collected.includes(c.id) && <Image source={c.src} style={StyleSheet.absoluteFill} />}
             </Pressable>
           ))}
@@ -338,7 +391,7 @@ export default function WorldScreen() {
           <Text style={styles.title}>{collected.length ? '함께할 아이를 고르게' : '아직 만난 아이가 없네. 하층부에서 찾아보게.'}</Text>
           <View style={styles.grid}>
             {collected.filter((id) => CHAR_IMG[id]).map((id) => (
-              <Pressable key={id} onPress={() => { setMainChar(id); setPicking(false); }}>
+              <Pressable key={id} style={shrink(null)} onPress={() => { setMainChar(id); setPicking(false); }}>
                 <Image source={CHAR_IMG[id]} style={{ width: 96 * s, height: 96 * s }} />
               </Pressable>
             ))}
@@ -358,18 +411,25 @@ export default function WorldScreen() {
           {/* 오딘의 눈: bg_camera의 흰 원(32,189 지름 296) 안에 실제 카메라 */}
           <View style={[box(32, 189, 296, 296), styles.lens, { borderRadius: 148 * s }]}>
             {permission?.granted ? (
-              <CameraView ref={camera} style={styles.fill} facing="back" onCameraReady={() => setCamReady(true)} />
+              <CameraView ref={camera} style={styles.fill} facing={facing} onCameraReady={() => setCamReady(true)} />
             ) : (
               <Pressable style={styles.lensMsg} onPress={requestPermission}>
                 <Text style={styles.lensText}>눌러서 카메라 허용</Text>
               </Pressable>
             )}
           </View>
-          <Pressable style={styles.back} onPress={() => setStep('idle')}>
+          <Pressable style={shrink(styles.back)} onPress={() => setStep('idle')}>
             <Image source={img.backBtn} style={styles.fill} />
           </Pressable>
-          <Pressable style={styles.shutter} onPress={onShutter}>
+          <Pressable style={shrink(styles.shutter)} onPress={onShutter}>
             <Image source={img.shutter} style={styles.fill} />
+          </Pressable>
+          {/* ponytail: 전용 그림이 없어 시스템 아이콘. 디자인 나오면 obj_ 이미지로 교체 */}
+          <Pressable style={shrink([styles.camSide, { left: 40 }])} onPress={onGallery}>
+            <SymbolView name={{ ios: 'photo.on.rectangle', android: 'photo_library' }} size={32} tintColor="#555" />
+          </Pressable>
+          <Pressable style={shrink([styles.camSide, { right: 40 }])} onPress={() => setFacing(facing === 'back' ? 'front' : 'back')}>
+            <SymbolView name={{ ios: 'arrow.triangle.2.circlepath.camera', android: 'flip_camera_android' }} size={32} tintColor="#555" />
           </Pressable>
         </View>
       </Modal>
@@ -395,6 +455,9 @@ function TextBox({ s, title, body }: { s: number; title: string; body: string })
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
+  shrink: { transform: [{ scale: 0.9 }] },
+  sink: { transform: [{ translateY: 8 }] },
+  plant: { position: 'absolute' },
   page: { flex: 1, overflow: 'hidden' },
   dim: { backgroundColor: 'rgba(0,0,0,0.5)' },
   picker: { justifyContent: 'center', alignItems: 'center', gap: 16 },
@@ -410,4 +473,5 @@ const styles = StyleSheet.create({
   lensMsg: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   lensText: { color: '#777', fontSize: 15 },
   shutter: { position: 'absolute', bottom: 80, alignSelf: 'center', width: 72, height: 72 },
+  camSide: { position: 'absolute', bottom: 92, width: 48, height: 48, alignItems: 'center', justifyContent: 'center' }, // 셔터(72) 가운데 높이에 맞춤
 });
